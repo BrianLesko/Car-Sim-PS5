@@ -16,13 +16,14 @@ import math
 def main():
     # Set up the app UI
     gui.clean_format(wide=True)
-    gui.about(text = "This code renders a simple cube in the physics engine called pybullet. Use a PS5 remote to control the robot.")
+    gui.about(text = "This code renders and simulates a racecar using pybullet Physics. Use a PS5 remote to control the car")
     Title, subTitle, Sidebar, image_spot = st.empty(), st.empty(), st.sidebar.empty(), st.columns([1,5,1])[1].empty()
+    st.subheader("Pybullet Physics Engine")
     
-    # Setting up the dualsense controller connection
-    vendorID, productID = int("0x054C", 16), int("0x0CE6", 16)
-    ds = DualSense(vendorID, productID)
-    try: ds.connect()
+    try: 
+        vendorID, productID = int("0x054C", 16), int("0x0CE6", 16)
+        ds = DualSense(vendorID, productID)
+        ds.connect()
     except Exception as e: st.error("Error occurred while connecting to Dualsense controller. Make sure the controller is wired up and the vendor and product ID's are correctly set in the python script.")    
 
     # Start PyBullet in DIRECT mode
@@ -33,15 +34,14 @@ def main():
     p.setAdditionalSearchPath(pd.getDataPath())
     p.loadURDF('plane.urdf')
     p.setPhysicsEngineParameter(numSolverIterations=3)
+    p.setTimeStep(0.009)
     
     # Load robot URDF
-    xarm = p.loadURDF("xarm/xarm6_robot.urdf", flags=p.URDF_INITIALIZE_SAT_FEATURES, useFixedBase=True)
-    # Disable collisions for the robot
-    for i in range(p.getNumJoints(xarm)):
-        p.setCollisionFilterGroupMask(xarm, i, collisionFilterGroup=0, collisionFilterMask=0)
+    xarm = p.loadURDF("racecar/racecar.urdf", flags=p.URDF_INITIALIZE_SAT_FEATURES)
+    assert isinstance(xarm, int), "xarm should be an integer"
 
     # Pybullet Camera Controls 
-    width, height = 720, 720
+    width, height = 560, 560
     aspect = width / height
     fov, near, far = 60, .01, 11
     col1, col2, col3 = st.columns([1,5,1])
@@ -49,15 +49,20 @@ def main():
 
     # Sim variable initialization
     p.getNumJoints(xarm)
-    thetas = [0,0,0,0,0,0]
+    thetas = [0,0,0,0,0,0,0]
     prev_L1, prev_R1 = False, False
     th = robot.CyclicVariable(thetas)
-    step = .001
     angle = 0
     z, x, y = .5, .5, 1
     view_matrix = p.computeViewMatrix(cameraEyePosition=[x, y, z],cameraTargetPosition=[0, 0, .5],cameraUpVector=[0, 0, .5])
     projection_matrix = p.computeProjectionMatrixFOV(fov, aspect, near, far)
-    controlMode = p.POSITION_CONTROL
+    p.setGravity(0, 0, -9.8*1.5)
+    f = 1/3
+    Steps = 0
+
+    # Set the trigger resistance to 20%
+    ds.set_trigger(intensities=[20,20,20,20,20,20,20])
+    ds.send_outReport()
 
     # Simulation Loop
     targetValue = 0.5
@@ -67,54 +72,57 @@ def main():
         ds.updateTriggers()
         ds.updateThumbsticks()
 
-        # Determine which joint is selected
-        joints = [f"<span style='font-size:{'30' if i == th.index else '20'}px;'>J{i+1}</span>" for i in range(6)]
-        with Title: 
-            st.markdown(f" &nbsp; &nbsp; &nbsp; &nbsp;<L1/R1> &nbsp; &nbsp; &nbsp; &nbsp; &nbsp;{' &nbsp; | &nbsp; '.join(joints)} &nbsp; ", unsafe_allow_html=True)
+        thetas = np.zeros(7)
 
-        # Increment and decrement the controlled joint index based on the L1 and R1 buttons
-        if ds.L1 and not prev_L1:
-            th.decrement()
-        if ds.R1 and not prev_R1:
-            th.increment()
-        prev_L1 = ds.L1
-        prev_R1 = ds.R1
+        # Steering Control 
+        # use the left thumbstick to control the steering of the robot
+        if abs(ds.LX) > 4:
+            thetas[3] = -ds.LX/19
+            thetas[5] = -ds.LX/19
 
-        # Button Control
-        i = th.index
-        thetas[i] = 0 
-        if ds.L2 > 0:
-            thetas[i] = - ds.L2/10 #thetas[i] + step*ds.L2/6
-        if ds.R2 > 0:
-            thetas[i] = ds.R2/10 #thetas[i] - step*ds.R2/6
-        
-        p.stepSimulation()
+        # Throttle Control
+        thetas[[1, 2, 4, 6]] = np.where(ds.L2 > 0, -ds.L2 * f, ds.R2 * f)
 
-        # Control the robot
-        jointIndex = i+1
-        targetSpeed = thetas[i]  # Assuming thetas now contains target velocities
-        p.setJointMotorControl2(bodyUniqueId=xarm, jointIndex=jointIndex, controlMode=p.VELOCITY_CONTROL, targetVelocity=targetSpeed)
+        # Control the throttle
+        jointIndices = [1,2,3,4,5,6,7]  # Assuming thetas now contains target velocities for all joints
+        targetSpeeds = [thetas[0],thetas[1], thetas[2], thetas[3], thetas[4], thetas[5], thetas[6]]
+        controlModes = p.VELOCITY_CONTROL
+        p.setJointMotorControlArray(bodyIndex=1, jointIndices=jointIndices, controlMode=controlModes, targetVelocities=targetSpeeds)
 
-        # Camera control 
-        if abs(ds.RX) > 4 or abs(ds.RY) > 4:
-            if abs(ds.RX) > 4:
-                # Update angle based on thumbstick input and calculate new camera position
-                angle += ds.RX/700
-                x = math.cos(angle)
-                y = math.sin(angle)
+        # Control the steering
+        jointIndices = [4,6]  # Joint indices for joints 6 and 4
+        targetPositions = [thetas[3], thetas[5]]  # Target speeds for joints 6 and 4
+        controlModes = p.POSITION_CONTROL  # Control mode for joints 6 and 4
+        p.setJointMotorControlArray(bodyIndex=1, jointIndices=jointIndices, controlMode=controlModes, targetVelocities=targetPositions)
 
-            # Control camera tilt using ds.RY
-            if abs(ds.RY) > 4:
-                z += ds.RY/700  # Adjust the divisor as needed
-                z = max(.5, min(1.5, z))
-
-            # Camera setup
-            view_matrix = p.computeViewMatrix(cameraEyePosition=[x, y, z],cameraTargetPosition=[0, 0, .5],cameraUpVector=[0, 0, .5])
-            projection_matrix = p.computeProjectionMatrixFOV(fov, aspect, near, far)
+        Steps += 1
 
         # Capture image with OpenGL renderer
-        images = p.getCameraImage(width, height, view_matrix, projection_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
-        rgba_buffer_opengl = np.resize(np.array(images[2], dtype=np.uint8), (height, width, 4))
-        image_placeholder.image(rgba_buffer_opengl[:, :, :3], caption='OpenGL Renderer', use_column_width=True)
+        if Steps % 7 == 0:
+
+            # Get the car's position and orientation
+            car_pos, car_orient = p.getBasePositionAndOrientation(xarm)
+            car_orient_euler = p.getEulerFromQuaternion(car_orient)
+
+            # Calculate the camera's eye position based on the car's orientation
+            x = car_pos[0] + ds.RY/600 + math.cos(car_orient_euler[2]+ math.pi)*.7
+            y = car_pos[1] + ds.RX/600 + math.sin(car_orient_euler[2] + math.pi)*.7
+            z = car_orient_euler[1]  + car_pos[2]/4 + .4
+
+            # Calculate a point in front of the car based on the car's orientation
+            target_x = car_pos[0] + math.cos(car_orient_euler[2]) + ds.RX/200
+            target_y = car_pos[1] + math.sin(car_orient_euler[2]) + ds.RY/200
+            target_z = car_pos[2]/4 + .3
+            target = [target_x, target_y, target_z]
+
+            # Update the camera's target position to follow the car
+            view_matrix = p.computeViewMatrix(cameraEyePosition=[x, y, z], cameraTargetPosition=target, cameraUpVector=[0, 0, .6])
+
+            # Capture image with OpenGL renderer
+            images = p.getCameraImage(width, height, view_matrix, projection_matrix, renderer=p.ER_BULLET_HARDWARE_OPENGL)
+            rgba_buffer_opengl = np.resize(np.array(images[2], dtype=np.uint8), (height, width, 4))
+            image_placeholder.image(rgba_buffer_opengl[:, :, :3], caption='OpenGL Renderer', use_column_width=True)
+
+        p.stepSimulation()
 
 main()
